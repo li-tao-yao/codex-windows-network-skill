@@ -7,10 +7,11 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$OutDir = $PSScriptRoot
+    [string]$OutDir
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($OutDir)) { $OutDir = $PSScriptRoot }
 
 $candidates = @(
     (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
