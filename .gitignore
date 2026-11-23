@@ -1,0 +1,12 @@
+# Prebuilt executables are distributed via GitHub Releases, not tracked in Git.
+# Build locally from scripts/*.cs via scripts/Build-Tools.ps1.
+scripts/*.exe
+scripts/*.pdb
+release/
+
+# Local backups, logs, and OS metadata
+*.bak
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini

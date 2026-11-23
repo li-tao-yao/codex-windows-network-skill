@@ -1,0 +1,4 @@
+interface:
+  display_name: "解决 Windows 网络配置问题"
+  short_description: "定位节点、系统代理和应用传输故障，主动修复 Codex 重连并验证代理启停"
+  default_prompt: "使用 $windows-network-repair 定位并修复本机网络问题，验证普通浏览器、Codex 工作空间和真实新聊天。"
