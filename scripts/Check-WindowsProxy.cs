@@ -195,43 +195,47 @@ namespace ProxyCheck {
             Console.WriteLine("{0}: manual={1} endpoint={2}", label, (flags & 2) != 0 ? "on" : "off",
                 Native.DescribeEndpoint(Encoding.ASCII.GetString(data, 16, count)));
         }
-        static void CompareDialupNames(string name, RegistryView view) {
+        internal static string CandidateName(string name) {
             var strictUtf8 = new UTF8Encoding(false, true);
             var gbk = Encoding.GetEncoding(936, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback);
-            string alternate;
             try {
-                alternate = gbk.GetString(strictUtf8.GetBytes(name));
-                if (strictUtf8.GetString(gbk.GetBytes(alternate)) != name) return;
-            } catch (ArgumentException) {
-                Console.WriteLine("{0}: name has no reversible UTF-8/GBK candidate", view);
-                return;
-            }
+                string candidate = gbk.GetString(strictUtf8.GetBytes(name));
+                if (strictUtf8.GetString(gbk.GetBytes(candidate)) == name &&
+                    !String.Equals(candidate, name, StringComparison.OrdinalIgnoreCase)) return candidate;
+            } catch (ArgumentException) { }
+            return null;
+        }
+        static void CompareDialupNames(string name, RegistryView view) {
             using (var hive = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, view))
             using (var key = hive.OpenSubKey(InternetSettings + @"\Connections")) {
-                if (key == null) { Console.WriteLine("{0}: no Connections key", view); return; }
-                var names = key.GetValueNames();
-                bool exact = names.Contains(name, StringComparer.OrdinalIgnoreCase);
-                bool distinct = !String.Equals(name, alternate, StringComparison.OrdinalIgnoreCase);
-                bool candidate = distinct && names.Contains(alternate, StringComparer.OrdinalIgnoreCase);
-                Console.WriteLine("{0}: correct-name={1}; distinct UTF8-as-GBK candidate={2}", view, exact, candidate);
-                if (exact) ShowRecord(key, name, "Correct-name record");
-                if (!candidate) return;
-                ShowRecord(key, alternate, "Candidate record");
-                if (!names.Contains("DefaultConnectionSettings", StringComparer.OrdinalIgnoreCase) ||
-                    key.GetValueKind(alternate) != RegistryValueKind.Binary ||
-                    key.GetValueKind("DefaultConnectionSettings") != RegistryValueKind.Binary) {
-                    Console.WriteLine("Candidate/default missing or not both REG_BINARY."); return;
-                }
-                var data = key.GetValue(alternate) as byte[];
-                var baseline = key.GetValue("DefaultConnectionSettings") as byte[];
-                if (!HasBoundedFields(data) || !HasBoundedFields(baseline)) {
-                    Console.WriteLine("Candidate/default length fields do not fit known layout."); return;
-                }
-                uint length = BitConverter.ToUInt32(data, 12);
-                var server = Native.DescribeEndpoint(Encoding.ASCII.GetString(data, 16, (int)length));
-                Console.WriteLine("Both REG_BINARY, three fields bounded; bytes from offset 8 equal={0}; candidate flags={1}; candidate endpoint={2}",
-                    data.Skip(8).SequenceEqual(baseline.Skip(8)), BitConverter.ToUInt32(data, 8), server);
+                ReportDialupRecords(key,name,view);
             }
+        }
+        internal static void ReportDialupRecords(RegistryKey key,string name,RegistryView view) {
+            if (key == null) { Console.WriteLine("{0}: no Connections key", view); return; }
+            var names = key.GetValueNames();
+            bool exact = names.Contains(name, StringComparer.OrdinalIgnoreCase);
+            Console.WriteLine("{0}: correct-name={1}", view, exact);
+            if (exact) ShowRecord(key, name, "Correct-name record");
+            string alternate = CandidateName(name);
+            bool candidate = alternate != null && names.Contains(alternate, StringComparer.OrdinalIgnoreCase);
+            Console.WriteLine("{0}: distinct UTF8-as-GBK candidate={1}", view, candidate);
+            if (!candidate) return;
+            ShowRecord(key, alternate, "Candidate record");
+            if (!names.Contains("DefaultConnectionSettings", StringComparer.OrdinalIgnoreCase) ||
+                key.GetValueKind(alternate) != RegistryValueKind.Binary ||
+                key.GetValueKind("DefaultConnectionSettings") != RegistryValueKind.Binary) {
+                Console.WriteLine("Candidate/default missing or not both REG_BINARY."); return;
+            }
+            var data = key.GetValue(alternate) as byte[];
+            var baseline = key.GetValue("DefaultConnectionSettings") as byte[];
+            if (!HasBoundedFields(data) || !HasBoundedFields(baseline)) {
+                Console.WriteLine("Candidate/default length fields do not fit known layout."); return;
+            }
+            uint length = BitConverter.ToUInt32(data, 12);
+            var server = Native.DescribeEndpoint(Encoding.ASCII.GetString(data, 16, (int)length));
+            Console.WriteLine("Both REG_BINARY, three fields bounded; bytes from offset 8 equal={0}; candidate flags={1}; candidate endpoint={2}",
+                data.Skip(8).SequenceEqual(baseline.Skip(8)), BitConverter.ToUInt32(data, 8), server);
         }
         internal static string LifecycleFinding(string expect, Result current, bool listening, int port, int? userSwitch) {
             if (current.PAC == "on" || current.AutoDetect == "on")

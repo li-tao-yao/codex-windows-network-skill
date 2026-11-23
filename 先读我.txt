@@ -7,5 +7,5 @@
 
 系统代理：普通桌面环境下双击 scripts\Check-WindowsProxy.exe。它只读检查；本地端口不同可用 --port 参数。输出中的 loopback 指本机。
 每次退出代理都要手动修复、正在使用 Windows 宽带拨号时，请 AI 阅读 references\ppp-sync.md，先核实开关和端口是否同步。普通 Wi-Fi、路由器拨号的电脑从 SKILL.md 选择对应分支。
-Codex：打开并登录 Codex，双击 scripts\Repair-CodexReconnect.exe。它会做握手对照，只有临时开关有效且你同意时才备份并保存一项用户配置。若已有相应授权，本机 AI 可使用 --apply --no-pause；仅诊断使用 --check --no-pause。没有安装 Codex 可跳过。
+Codex：打开并登录 Codex，双击 scripts\Repair-CodexReconnect.exe。工具核对官方商店版后端，分别检查服务 HTTP 和 WebSocket。返回 5 代表握手已通、HTTP 仍待查。只有临时开启系统代理使两项都通过且你同意时，工具才会保存配置；原有配置会先备份。若已有相应授权，本机 AI 可使用 --apply --no-pause；仅诊断使用 --check --no-pause。没有安装 Codex 可跳过。
 限制执行程序的设备，请使用管理员允许的工具完成文档中的只读检查。回传时仅复制状态和耗时，遮盖截图里的用户名、私人路径或实际域名。请勿上传完整配置、注册表备份、网络日志或私有节点信息。

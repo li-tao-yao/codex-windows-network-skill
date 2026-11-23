@@ -43,7 +43,7 @@ foreach ($t in $targets) {
     if (-not (Test-Path -LiteralPath $t.Source)) {
         throw "缺少源码文件: $($t.Source)"
     }
-    $argsList = @('/nologo', '/optimize+', '/target:exe', '/utf8output')
+    $argsList = @('/nologo', '/optimize+', '/target:exe', '/codepage:65001', '/utf8output')
     foreach ($r in $t.Refs) {
         $argsList += "/r:$r"
     }

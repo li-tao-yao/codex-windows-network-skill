@@ -1,11 +1,15 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -13,6 +17,11 @@ using System.Web.Script.Serialization;
 
 // Windows .NET Framework 4.x. The installed desktop backend handles authentication and TOML edits.
 namespace CodexReconnect {
+    // Only messages constructed by this tool are suitable for sharing.
+    internal sealed class RepairFailure : Exception {
+        public RepairFailure(string message) : base(message) {}
+    }
+
     internal class Core {
         const string Flag = "respect_system_proxy";
         internal delegate string Invoke(string arguments, int proxyPort);
@@ -24,7 +33,10 @@ namespace CodexReconnect {
             call = invoke; say = output; userHome = expectedConfigHome;
         }
         static string Field(Dictionary<string,object> row, string key) {
-            object v; return row.TryGetValue(key, out v) && v is string ? (string)v : "";
+            object v;
+            if (!row.TryGetValue(key,out v)) return "";
+            if (v is int || v is long) return Convert.ToString(v,System.Globalization.CultureInfo.InvariantCulture);
+            return v as string ?? "";
         }
         Dictionary<string,object> ObjectAt(Dictionary<string,object> row, string key) {
             object v; return row.TryGetValue(key, out v) && v is Dictionary<string,object> ? (Dictionary<string,object>)v : empty;
@@ -33,28 +45,29 @@ namespace CodexReconnect {
             var map = ObjectAt(report, "checks");
             if (map.Count != 0) return ObjectAt(map,id);
             object rows;
-            if (report.TryGetValue("checks",out rows) && rows is object[])
-                foreach (var item in ((object[])rows).OfType<Dictionary<string,object>>())
+            if (report.TryGetValue("checks",out rows) && rows is IEnumerable && !(rows is string))
+                foreach (var item in ((IEnumerable)rows).OfType<Dictionary<string,object>>())
                     if (Field(item,"id")==id) return item;
             return empty;
         }
         sealed class Probe {
-            public bool Good, TransportFailure, ClosedEarly;
+            public bool WebSocketGood, HttpGood, TransportFailure, ClosedEarly;
+            public bool Good { get { return WebSocketGood && HttpGood; } }
             public string Config, Home, ProxySetting;
         }
         Probe Doctor(string label, string args, int port) {
             var json=call(args,port);
             Dictionary<string,object> report;
             try { report=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(json); }
-            catch(ArgumentException) { throw new InvalidDataException("此版本的 doctor 未返回可识别的 JSON。"); }
-            catch(InvalidOperationException) { throw new InvalidDataException("此版本的 doctor 报告格式无法读取。"); }
-            if (report == null) throw new InvalidDataException("doctor 返回空报告");
+            catch(ArgumentException) { throw new RepairFailure("此版本的 doctor 未返回可识别的 JSON。"); }
+            catch(InvalidOperationException) { throw new RepairFailure("此版本的 doctor 报告格式无法读取。"); }
+            if (report == null) throw new RepairFailure("doctor 返回空报告");
             var ws = Row(report,"network.websocket_reachability");
             var http = Row(report,"network.provider_reachability");
             var details = ObjectAt(ws,"details");
             string status = Field(ws,"status"), summary = Field(ws,"summary"), handshake = Field(details,"handshake result");
             bool closedEarly=Regex.IsMatch(summary,@"closed (?:immediately )?after (?:the )?handshake|closed .*before response\.completed",RegexOptions.IgnoreCase)
-                || (handshake.IndexOf("101",StringComparison.Ordinal)>=0 && Regex.IsMatch(Field(details,"immediate close code"),@"\b[1-4]\d{3}\b"));
+                || Regex.IsMatch(Field(details,"immediate close code"),@"\b[1-4]\d{3}\b");
             bool good = !closedEarly && status=="ok" && (handshake.IndexOf("101",StringComparison.Ordinal)>=0 ||
                 summary.IndexOf("handshake succeeded",StringComparison.OrdinalIgnoreCase)>=0);
             string evidence=String.Join(" ",details.Values.Select(Convert.ToString).Concat(new[]{summary}));
@@ -65,11 +78,19 @@ namespace CodexReconnect {
                 && !Regex.IsMatch(evidence,@"\b(401|403|407|429)\b|not support|unsupported|not configured|sign.in required|unauthori|rate limit|invalid request|access program not enabled",RegexOptions.IgnoreCase);
             object duration;
             say(String.Format("{0}：HTTP={1}，WebSocket={2}，握手={3}，耗时={4} ms",
-                label,Field(http,"status"),status,closedEarly ? "已升级后断开" : good ? "成功" : failed ? "传输失败" : "查错误原文",
-                ws.TryGetValue("durationMs",out duration) ? Convert.ToString(duration) : "?"));
+                label,StatusLabel(http),StatusLabel(ws),closedEarly ? "已升级后断开" : good ? "成功" : failed ? "传输失败" : "查错误原文",
+                ws.TryGetValue("durationMs",out duration) && (duration is int || duration is long) ? Convert.ToString(duration) : "?"));
             var cfg=ObjectAt(Row(report,"config.load"),"details");
-            return new Probe {Good=good, TransportFailure=failed, ClosedEarly=closedEarly, Config=Field(cfg,"config.toml"),
+            return new Probe {WebSocketGood=good, HttpGood=Field(http,"status")=="ok", TransportFailure=failed, ClosedEarly=closedEarly, Config=Field(cfg,"config.toml"),
                 Home=Field(cfg,"CODEX_HOME"), ProxySetting=Field(ObjectAt(Row(report,"network.env"),"details"),"respect system proxy")};
+        }
+        static string StatusLabel(Dictionary<string,object> row) {
+            string status=Field(row,"status");
+            return Regex.IsMatch(status,@"\A(?:ok|warn|warning|fail|error|failed|skip|skipped)\z") ? status : "未知";
+        }
+        int Partial() {
+            say("部分通过：WebSocket 握手已通过，服务 HTTP 尚未通过或缺少报告。请核对服务 HTTP，并从原工作空间新建聊天验收。");
+            return 5;
         }
         string Effective() {
             var m=Regex.Match(call("features list",0),@"(?im)^[ \t]*respect_system_proxy[ \t]+[^\r\n]+?[ \t]+(true|false)[ \t]*\r?$");
@@ -95,7 +116,8 @@ namespace CodexReconnect {
             if (!help.Contains("--json")) { say("此版本没有可识别的 doctor JSON 检查；让本机 AI 按传输流程查询故障时段日志。"); return 2; }
             string args="doctor --json"+(help.Contains("--network-only") ? " --network-only" : "");
             var baseline=Doctor("当前默认配置",args,0);
-            if (baseline.Good) { say("已通过握手检查。若实际聊天出现过 5/5，请按发生时间查建连后断流和 HTTP 回退，并做桌面首轮及空闲后验收。"); return 0; }
+            if (baseline.Good) { say("服务 HTTP 和 WebSocket 握手均已通过。若实际聊天出现过 5/5，请按发生时间查建连后断流和 HTTP 回退，并做桌面首轮及空闲后验收。"); return 0; }
+            if (baseline.WebSocketGood) return Partial();
             if (baseline.ClosedEarly) { say("握手完成后连接已关闭；转入传输流程，关联真实聊天的关闭码、完成事件及代理端同一时刻的记录。"); return 2; }
             string effective=Effective();
             say("当前有效开关："+effective);
@@ -103,6 +125,7 @@ namespace CodexReconnect {
             // The current, known flag value serves as the first arm of the A/B comparison.
             bool wasOff=effective=="false";
             var other=Doctor(wasOff ? "临时启用系统代理" : "临时关闭系统代理", args+(wasOff ? " --enable " : " --disable ")+Flag,0);
+            if (other.WebSocketGood && !other.HttpGood) return Partial();
             if (wasOff && other.Good) {
                 if (baseline.ProxySetting=="enabled" || other.ProxySetting=="disabled" || !call("features enable --help",0).Contains("features enable")) {
                     say("开关报告不一致或当前版本缺少保存命令；由本机 AI 检查配置覆盖和用户级 TOML。"); return 2;
@@ -119,75 +142,98 @@ namespace CodexReconnect {
                 (IPAddress.IsLoopback(ep.Address)||ep.Address.Equals(IPAddress.Any)||ep.Address.Equals(IPAddress.IPv6Any)));
             if (!listener) { say("本机未监听指定端口。确认客户端正在运行；端口不同时用 --port 实际端口。"); return 2; }
             var directProxy=Doctor("仅此子进程显式使用本机代理",args+" --disable "+Flag,port);
+            if (directProxy.WebSocketGood && !directProxy.HttpGood) return Partial();
             say(directProxy.Good ? "进入 Windows 系统选路分支：运行同目录 Check-WindowsProxy.exe；修复实际取值后重新运行本工具。"
                 : "显式代理也未恢复握手：按节点路径分支对照可用节点、真实核心报错及故障时段记录，再复测 Codex。");
             return directProxy.Good ? 4 : 2;
         }
         int Save(string file,string args) {
             if(File.Exists(file) && (File.GetAttributes(file)&FileAttributes.ReparsePoint)!=0)
-                throw new IOException("配置是重解析点，请由本机 AI 核对实际文件后定向修改。");
+                throw new RepairFailure("配置是重解析点，请由本机 AI 核对实际文件后定向修改。");
             byte[] before=HashFile(file);
             string backup=file+".pre-reconnect-"+Guid.NewGuid().ToString("N")+".bak";
             if(before!=null) {
                 File.Copy(file,backup,false);
-                if(!Same(before,HashFile(backup))) throw new IOException("备份校验失败");
+                if(!Same(before,HashFile(backup))) throw new RepairFailure("备份校验失败");
                 say("本机配置目录内的备份："+Path.GetFileName(backup));
             }
-            if (!Same(before,HashFile(file)) || Effective()!="false") throw new IOException("配置已变化，请重新检查");
+            if (!Same(before,HashFile(file)) || Effective()!="false") throw new RepairFailure("配置已变化，请重新检查");
             byte[] after=null;
             try {
                 call("features enable "+Flag,0);
                 after=HashFile(file);
-                if (after==null || Effective()!="true") throw new IOException("保存后的有效开关未生效");
-                if (!Doctor("保存后无临时覆盖",args,0).Good) throw new IOException("保存后握手未通过");
-                say("配置与握手验证通过。等进行中的任务结束，从普通图标重开 Codex，新建聊天并接收完整回复；空闲后再测一次。");
+                if (after==null || Effective()!="true") throw new RepairFailure("保存后的有效开关未生效");
+                var verified=Doctor("保存后无临时覆盖",args,0);
+                if (!verified.Good) {
+                    Rollback(file,backup,before,after);
+                    if (verified.WebSocketGood) return Partial();
+                    say("保存后网络验证未通过。请复核服务状态与实际选路。");
+                    return 2;
+                }
+                say("服务 HTTP 和 WebSocket 验证均通过。等进行中的任务结束，从普通图标重开 Codex，在原工作空间新建聊天并接收完整回复，空闲后再测一次。");
                 return 0;
             } catch {
-                say("持久化或复测未完成。请保留本机备份。");
-                // Some native failures occur after the flag has reached disk.
-                if(after==null) after=HashFile(file);
-                if (after!=null && Same(after,HashFile(file)) && !Same(before,after)) {
-                    if (TryExactUndo(file,backup,before,after)) say("已撤回本次配置改动，恢复写入前的文件状态。");
-                    else if(Effective()=="true" && Same(after,HashFile(file))) {
-                        call("features disable "+Flag,0);
-                        if(Effective()=="false") say("已通过原生编辑器恢复该开关原有效值 false。原先未显式设置时，文件中可能留有 false 项。");
-                        else say("原生回滚未验证，请根据本机备份手工核对该开关。");
-                    }
-                } else if(after!=null && !Same(after,HashFile(file))) {
-                    say("检测到并发编辑，已保留现有文件。本次开关可能仍为 true；请按备份仅核对和恢复这一项。");
-                }
+                Rollback(file,backup,before,after);
                 throw;
             }
         }
-        bool TryExactUndo(string file,string backup,byte[] before,byte[] after) {
-            if(before!=null && !Same(before,HashFile(backup))) return false;
-            string original=before==null ? "" : File.ReadAllText(backup);
-            string updated=File.ReadAllText(file);
-            bool simple=false;
-            foreach(Match m in Regex.Matches(updated,@"(?m)^[ \t]*respect_system_proxy[ \t]*=[ \t]*(?<v>true)[ \t]*(?:#[^\r\n]*)?(?:\r?\n|\z)")) {
-                Group v=m.Groups["v"];
-                string flipped=updated.Remove(v.Index,v.Length).Insert(v.Index,"false");
-                string removed=updated.Remove(m.Index,m.Length);
-                if(flipped==original || removed==original) {simple=true;break;}
-                // Match a newly appended [features] table and the one key, including for a new config.
-                if(updated.StartsWith(original,StringComparison.Ordinal) &&
-                    Regex.IsMatch(updated.Substring(original.Length),@"\A\s*\[features\][ \t]*\r?\n[ \t]*respect_system_proxy[ \t]*=[ \t]*true\s*\z")) {simple=true;break;}
+
+        [DllImport("kernel32.dll", SetLastError=true)]
+        static extern bool SetFileInformationByHandle(SafeFileHandle handle, int infoClass, ref byte info, uint size);
+
+        static bool OnlyFlagChanged(byte[] original, byte[] updated) {
+            var utf8=new UTF8Encoding(false,true);
+            string previous=utf8.GetString(original);
+            string next=utf8.GetString(updated);
+            foreach (Match match in Regex.Matches(next,@"(?m)^[ \t]*respect_system_proxy[ \t]*=[ \t]*(?<v>true)[ \t]*(?:#[^\r\n]*)?(?:\r?\n|\z)")) {
+                Group value=match.Groups["v"];
+                if (next.Remove(value.Index,value.Length).Insert(value.Index,"false")==previous ||
+                    (Regex.IsMatch(match.Value,@"\Arespect_system_proxy = true(?:\r?\n)?\z") &&
+                     next.Remove(match.Index,match.Length)==previous)) return true;
             }
-            if(!simple || !Same(after,HashFile(file))) return false;
-            string nonce=Guid.NewGuid().ToString("N"), displaced=file+".undo-"+nonce;
-            if(before==null) File.Move(file,displaced);
-            else {
-                string staging=file+".restore-"+nonce;
-                File.Copy(backup,staging,false);
-                try { File.Replace(staging,file,displaced); }
-                finally { if(File.Exists(staging)) File.Delete(staging); }
+            return next.StartsWith(previous,StringComparison.Ordinal) &&
+                Regex.IsMatch(next.Substring(previous.Length),@"\A(?:\r?\n){0,2}\[features\]\r?\nrespect_system_proxy = true(?:\r?\n)?\z");
+        }
+
+        // Validate and restore on one exclusive Windows handle. A racing save either
+        // wins before the open (and fails our comparison) or cannot replace the open file.
+        internal static bool TryExactUndo(string file,string backup,byte[] before,byte[] after) {
+            if (after==null) return false;
+            byte[] original=before==null ? new byte[0] : File.ReadAllBytes(backup);
+            using (var sha=SHA256.Create()) {
+                if (before!=null && !Same(before,sha.ComputeHash(original))) return false;
+                var rights=FileSystemRights.Read | (before==null ? FileSystemRights.Delete : FileSystemRights.Write);
+                using (var stream=new FileStream(file,FileMode.Open,rights,FileShare.None,4096,FileOptions.None)) {
+                    if ((File.GetAttributes(file)&FileAttributes.ReparsePoint)!=0 || !Same(after,sha.ComputeHash(stream))) return false;
+                    stream.Position=0;
+                    byte[] updated;
+                    using (var buffer=new MemoryStream()) { stream.CopyTo(buffer); updated=buffer.ToArray(); }
+                    if (!OnlyFlagChanged(original,updated)) return false;
+                    if (before==null) {
+                        byte deleteOnClose=1;
+                        // FILE_DISPOSITION_INFO applies to this verified file until the handle closes.
+                        return SetFileInformationByHandle(stream.SafeFileHandle,4,ref deleteOnClose,1);
+                    }
+                    stream.Position=0;
+                    stream.Write(original,0,original.Length);
+                    stream.SetLength(original.Length);
+                    stream.Flush(true);
+                    return true;
+                }
             }
-            if(!Same(after,HashFile(displaced))) {
-                say("本机配置目录保留了回滚期间的并发编辑："+Path.GetFileName(displaced)+"。请本机 AI 合并。");
-                throw new IOException("检测到并发修改");
+        }
+        void Rollback(string file,string backup,byte[] before,byte[] after) {
+            try {
+                if (TryExactUndo(file,backup,before,after)) {
+                    say("已撤回本次单项改动并恢复原配置状态。");
+                    return;
+                }
+            } catch (IOException) {
+                // Sharing violations and missing files must leave the active path alone.
+            } catch (UnauthorizedAccessException) {
+            } catch (DecoderFallbackException) {
             }
-            File.Delete(displaced);
-            return true;
+            say("未自动回滚：无法独占核实本次单项差异。请保留当前配置，按原值只核对 [features] 中的 respect_system_proxy。");
         }
     }
     internal static class Program {
@@ -209,26 +255,35 @@ namespace CodexReconnect {
             }
             return expected;
         }
+        internal static string SelectBackend(string registeredLocation,IEnumerable<string> running) {
+            if (String.IsNullOrWhiteSpace(registeredLocation) || !Path.IsPathRooted(registeredLocation))
+                throw new RepairFailure("未能确认官方商店安装包。请核对目标桌面应用。");
+            string trusted=Path.GetFullPath(Path.Combine(registeredLocation,@"app\resources\codex.exe"));
+            var candidates=new HashSet<string>(running,StringComparer.OrdinalIgnoreCase);
+            if (!File.Exists(trusted) || (candidates.Count>0 && !candidates.Contains(trusted)))
+                throw new RepairFailure("已安装的官方后端与当前运行位置不符，或此布局暂未支持。请打开目标商店版再试。");
+            return trusted;
+        }
         static string FindBackend() {
-            var paths=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach(var p in Process.GetProcessesByName("codex")) {
-                using(p) {
+            string shell=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),@"WindowsPowerShell\v1.0\powershell.exe");
+            string lookup="-NoLogo -NoProfile -NonInteractive -Command \""
+                +"$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+                +"Import-Module (Join-Path $PSHOME 'Modules\\Appx\\Appx.psd1'); "
+                +"$packages=@(Appx\\Get-AppxPackage -Name OpenAI.Codex | Where-Object { "
+                +"$_.PackageFamilyName -ceq 'OpenAI.Codex_2p2nqsd0c76g0' -and $_.SignatureKind -eq 'Store' "
+                +"-and -not $_.IsDevelopmentMode -and $_.Status -eq 'Ok' }); "
+                +"if ($packages.Count -eq 1) { $packages[0].InstallLocation }\"";
+            string location=Exec(shell,lookup,0).Trim();
+            var running=new List<string>();
+            foreach (var process in Process.GetProcessesByName("codex")) {
+                using (process) {
                     try {
-                        string path=p.MainModule.FileName;
-                        if(Regex.IsMatch(path,@"\\resources\\(?:[^\\]+\\)*codex\.exe$",RegexOptions.IgnoreCase)) paths.Add(path);
-                    } catch(System.ComponentModel.Win32Exception) {} catch(InvalidOperationException) {}
+                        string path=process.MainModule.FileName;
+                        if (Regex.IsMatch(path,@"\\resources\\(?:[^\\]+\\)*codex\.exe$",RegexOptions.IgnoreCase)) running.Add(path);
+                    } catch (System.ComponentModel.Win32Exception) {} catch (InvalidOperationException) {}
                 }
             }
-            if(paths.Count!=1) {
-                string shell=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),@"WindowsPowerShell\v1.0\powershell.exe");
-                string location=Exec(shell,"-NoLogo -NoProfile -NonInteractive -Command \"[Console]::OutputEncoding=[Text.Encoding]::UTF8; (Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1).InstallLocation\"",0).Trim();
-                if(!String.IsNullOrWhiteSpace(location) && Path.IsPathRooted(location)) {
-                    string candidate=Path.Combine(location,@"app\resources\codex.exe");
-                    if(File.Exists(candidate) && (paths.Count==0 || paths.Contains(candidate))) return candidate;
-                }
-                throw new InvalidOperationException("请打开并登录目标 Codex 桌面应用，核对正在运行的后端版本。");
-            }
-            return paths.Single();
+            return SelectBackend(location,running);
         }
         static string Exec(string exe,string args,int port) {
             var info=new ProcessStartInfo(exe,args) { UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,
@@ -247,12 +302,17 @@ namespace CodexReconnect {
                 var stdout=p.StandardOutput.ReadToEndAsync(); var stderr=p.StandardError.ReadToEndAsync();
                 // A config editor must finish its own transaction. Only terminate this tool's timed-out diagnostic.
                 if(args.StartsWith("doctor ",StringComparison.Ordinal) && !p.WaitForExit(120000)) {
-                    try {p.Kill();} catch(InvalidOperationException) {} throw new TimeoutException("doctor 在 120 秒内未完成");
+                    try {p.Kill();} catch(InvalidOperationException) {} throw new RepairFailure("doctor 在 120 秒内未完成");
                 }
                 p.WaitForExit(); string raw=stdout.GetAwaiter().GetResult(); stderr.GetAwaiter().GetResult();
-                if (p.ExitCode!=0 && !args.StartsWith("doctor --json",StringComparison.Ordinal)) throw new InvalidOperationException("桌面后端未完成 "+args);
+                if (p.ExitCode!=0 && !args.StartsWith("doctor --json",StringComparison.Ordinal)) throw new RepairFailure("子进程未成功完成，请核对安装包、后端版本和对应诊断步骤。");
                 return raw;
             }
+        }
+        internal static string FailureMessage(string stage,Exception error) {
+            var known=error as RepairFailure;
+            return "未完成（"+stage+"）："+(known!=null ? known.Message :
+                String.Format("{0}，错误码 0x{1:X8}",error.GetType().Name,error.HResult));
         }
         static int Main(string[] args) {
             bool check=false, apply=false, pause=Environment.UserInteractive && !Console.IsInputRedirected;
@@ -266,18 +326,21 @@ namespace CodexReconnect {
             }
             if(check && apply) return 1;
             int rc=1;
+            string stage="校验用户环境";
             try {
                 string home=NormalHome();
-                if(home==null) throw new InvalidOperationException("配置目录校验未通过，保留现有设置。");
+                if(home==null) throw new RepairFailure("配置目录校验未通过，保留现有设置。");
                 var overrides=ProxyVariables.Where(n=>Environment.GetEnvironmentVariable(n)!=Persistent(n)).ToArray();
                 if(overrides.Length>0) Console.WriteLine("诊断子进程已还原普通用户的代理变量来源，仅列出变量名："+String.Join(",",overrides));
+                stage="验证官方桌面后端";
                 string exe=FindBackend();
                 using(var mutex=new Mutex(false,@"Local\CodexNetworkReconnectRepair")) {
                     bool owns=false;
                     try {
                         try {owns=mutex.WaitOne(0);} catch(AbandonedMutexException){owns=true;}
-                        if(!owns) throw new InvalidOperationException("本登录会话已有修复检查在运行。");
+                        if(!owns) throw new RepairFailure("本登录会话已有修复检查在运行。");
                         var core=new Core((cmd,p)=>Exec(exe,cmd,p),Console.WriteLine,home);
+                        stage="网络检查与配置验证";
                         rc=core.Run(check,()=>{
                             if(apply) return true;
                             if(Console.IsInputRedirected) return false;
@@ -286,15 +349,15 @@ namespace CodexReconnect {
                         },port);
                         if(rc==4) {
                             var checker=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"Check-WindowsProxy.exe");
-                            if(!File.Exists(checker)) throw new IOException("已定位显式代理分支；缺少 Windows 检查器，请用 references/windows.md 的原生对照。");
+                            if(!File.Exists(checker)) throw new RepairFailure("已定位显式代理分支；缺少 Windows 检查器，请用 references/windows.md 的原生对照。");
                             try { Console.WriteLine(Exec(checker,"--no-pause --port "+port,0).TrimEnd()); }
-                            catch { throw new IOException("已定位显式代理分支；Windows 检查未完成，请按 references/windows.md 采集。"); }
+                            catch { throw new RepairFailure("已定位显式代理分支；Windows 检查未完成，请按 references/windows.md 采集。"); }
                         }
                     } finally {if(owns) mutex.ReleaseMutex();}
                 }
             } catch(Exception e) {
                 rc=1;
-                Console.WriteLine("未完成："+(e is InvalidOperationException || e is TimeoutException || e is IOException ? e.Message : e.GetType().Name));
+                Console.WriteLine(FailureMessage(stage,e));
             }
             if(pause){Console.WriteLine("按回车关闭。");Console.ReadLine();}
             return rc;

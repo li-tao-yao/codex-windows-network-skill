@@ -8,10 +8,10 @@
 
 ### 自动对照与持久化修复
 
-1. 有本机能力的 AI 主动运行 `scripts/Repair-CodexReconnect.exe`（若本地未预置，可从 Releases 下载或运行 [Build-Tools.ps1](../scripts/Build-Tools.ps1) 从[源码](../scripts/Repair-CodexReconnect.cs)编译）。只读用 `--check --no-pause`；用户已明确授权下述单项修复时直接用 `--apply --no-pause`。普通用户双击时，命中条件后再确认写入。非默认本地 HTTP/混合端口用 `--port 数字`。工具会找运行中的桌面后端，必要时回查官方安装包；以实际版本的 doctor/feature 支持为准。
-2. 先查默认配置、服务 HTTP 和 Responses WebSocket。若发生传输超时，比较临时打开/关闭 `respect_system_proxy`。维持网络和节点不变；工具按普通用户的代理环境建立基线，显式代理对照只覆盖单个诊断子进程。临时开关对照改善握手且原有效值为 false 时，核实实际用户配置路径，备份并通过原生 features 命令启用，随后在无临时开关覆盖时复测。握手已健康则保留原配置。此项适用于原生运行时自己的请求。[官方系统代理配置](https://learn.chatgpt.com/docs/enterprise/managed-configuration#use-the-system-proxy-for-native-client-requests)
-3. 结果码：0 表示握手健康或配置复测通过；3 表示存在有效改动但尚未保存；4 表示显式本地代理握手成功而自动路径失败，工具会调用系统检查器，继续[系统分支](windows.md)后再跑一遍。2 表示需按错误或节点分支继续，1 表示工具未完整执行。对账号、提供方、限流等错误按实际状态处理。
-4. 若工具遇到版本、路径或配置覆盖差异，由本机 AI 查看实际后端的 `--help`、`doctor --help`、`features list`。支持时用 `doctor --network-only --json`，临时对照参数为 `--disable respect_system_proxy` / `--enable respect_system_proxy`。只读取所需检查的状态和耗时。已认证握手返回 HTTP 101 可以证明诊断连通；对未认证探针返回 401 应按其测试语义解读。保存失败或验证不通过时，按备份仅撤回本次改动，保留并发编辑。
+1. 有本机能力的 AI 主动运行 `scripts/Repair-CodexReconnect.exe`（若本地未预置，可从 Releases 下载或运行 [Build-Tools.ps1](../scripts/Build-Tools.ps1) 从[源码](../scripts/Repair-CodexReconnect.cs)编译）。只读用 `--check --no-pause`；用户已明确授权下述单项修复时直接用 `--apply --no-pause`。普通用户双击时，命中条件后再确认写入。非默认本地 HTTP/混合端口用 `--port 数字`。工具核对当前用户注册的官方商店安装包、发行者标识、签名类型及后端位置，再执行该包的后端。未识别的发行渠道请按实际版本手工诊断。
+2. 先查默认配置、服务 HTTP 和 Responses WebSocket。若发生传输超时，比较临时打开/关闭 `respect_system_proxy`。维持网络和节点不变；工具按普通用户的代理环境建立基线，显式代理对照只覆盖单个诊断子进程。临时临时开关使服务 HTTP 和握手都通过，且原有效值为 false 时，核实实际用户配置路径，备份并通过原生 features 命令启用，随后在无临时开关覆盖时复测。只有握手健康、HTTP 仍异常时报告部分通过，保留原配置。此项适用于原生运行时自己的请求。[官方系统代理配置](https://learn.chatgpt.com/docs/enterprise/managed-configuration#use-the-system-proxy-for-native-client-requests)
+3. 结果码：`0` 表示服务 HTTP 和 WebSocket 均通过，桌面工作空间和真实聊天另验。`5` 表示握手已通过，但服务 HTTP 异常或缺少该项结果。`3` 表示临时对照有效但尚未保存。`4` 表示显式本地代理下两项均通过而自动路径失败，工具会调用系统检查器，继续[系统分支](windows.md)后再跑一遍。2 表示需按错误或节点分支继续，1 表示工具未完整执行。对账号、提供方、限流等错误按实际状态处理。
+4. 若工具遇到版本、路径或配置覆盖差异，由本机 AI 查看实际后端的 `--help`、`doctor --help`、`features list`。支持时用 `doctor --network-only --json`，临时对照参数为 `--disable respect_system_proxy` / `--enable respect_system_proxy`。只读取所需检查的状态和耗时。已认证握手返回 HTTP 101 可以证明诊断连通；对未认证探针返回 401 应按其测试语义解读。保存后验证失败时，工具在同一个独占文件句柄内比对当前内容，只在可证明为本次单项差异时撤回。文件被占用、内容有其他编辑或写入结果未能核实时，保留当前文件并提示按原值核对该项。分享失败报告时只需操作阶段、错误类型和错误码。
 
 ### 保存设置后怎样确认桌面已采用
 

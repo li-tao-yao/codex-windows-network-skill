@@ -22,7 +22,7 @@
 
 ### 方式一：下载完整发布包（推荐普通用户 / 开箱即用）
 
-1. 前往本仓库的 [Releases 页面](https://github.com/li-tao-yao/codex-windows-network-skill/releases)，下载最新的完整压缩包（如 `codex-windows-network-skill-v1.0.0.zip`）。
+1. 前往本仓库的 [Releases 页面](https://github.com/li-tao-yao/codex-windows-network-skill/releases)，下载最新的完整压缩包（如 `codex-windows-network-skill-v1.0.1.zip`）。
    - 该压缩包已包含完整的 Skill 文档以及预编译好的 `scripts/Check-WindowsProxy.exe` 和 `scripts/Repair-CodexReconnect.exe`。
 2. 解压到本地目录（路径尽量不含特殊字符）。
 3. **本机 AI Agent（Codex / Antigravity / Claude Code 等）**：
@@ -49,7 +49,9 @@ cd codex-windows-network-skill
 powershell -ExecutionPolicy Bypass -File .\scripts\Build-Tools.ps1
 ```
 
-也可以直接从 [Releases 页面](https://github.com/li-tao-yao/codex-windows-network-skill/releases) 单独下载两个 `.exe` 放到 `scripts/` 目录，并对照 `SHA256SUMS.txt` 校验文件完整性。
+测试可在仓库根目录运行 `powershell -NoProfile -File .\tests\Run-Tests.ps1`，回归用例在临时目录中使用模拟 Codex 配置。
+
+也可以直接从 [Releases 页面](https://github.com/li-tao-yao/codex-windows-network-skill/releases) 单独下载两个 `.exe` 放到 `scripts/` 目录，并对照 `SHA256SUMS.txt` 校验文件完整性。例如运行 `Get-FileHash -Algorithm SHA256 .\codex-windows-network-skill-v1.0.1.zip`，与清单中同名文件的值比较。
 
 ---
 
@@ -62,12 +64,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Build-Tools.ps1
 | `scripts/Check-WindowsProxy.exe` | [Check-WindowsProxy.cs](scripts/Check-WindowsProxy.cs) | **纯只读检查**，不修改任何系统设置，不输出私人地址/PAC/凭据 | `--port 10808 --no-pause`<br>`--expect on/off` |
 | `scripts/Repair-CodexReconnect.exe` | [Repair-CodexReconnect.cs](scripts/Repair-CodexReconnect.cs) | 先做只读握手对照；仅在临时启用 `respect_system_proxy` 有效且获机主确认后，才备份并通过原生命令保存该项 | `--check --no-pause`（只读）<br>`--apply --no-pause`（获准修复）<br>`--port 10808` |
 
+修复工具会核对当前用户安装的官方 Microsoft Store 版 Codex。识别失败时会停止自动调用。它分别报告服务 HTTP 和 Responses WebSocket。两项均通过返回 `0`，握手通过但 HTTP 异常或缺失返回 `5`。真实聊天还需从普通图标回到原工作空间，新建聊天并收到完整回复。[完整结果码](references/codex.md)
+
 如需手动编译，可在 Windows PowerShell 中直接调用系统自带的 `csc.exe`：
 
 ```powershell
 $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-& $csc /nologo /optimize+ /target:exe /utf8output /out:scripts\Check-WindowsProxy.exe scripts\Check-WindowsProxy.cs
-& $csc /nologo /optimize+ /target:exe /utf8output /r:System.Web.Extensions.dll /out:scripts\Repair-CodexReconnect.exe scripts\Repair-CodexReconnect.cs
+& $csc /nologo /optimize+ /target:exe /codepage:65001 /utf8output /out:scripts\Check-WindowsProxy.exe scripts\Check-WindowsProxy.cs
+& $csc /nologo /optimize+ /target:exe /codepage:65001 /utf8output /r:System.Web.Extensions.dll /out:scripts\Repair-CodexReconnect.exe scripts\Repair-CodexReconnect.cs
 ```
 
 ---
